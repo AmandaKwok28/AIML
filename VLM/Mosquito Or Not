@@ -1,0 +1,176 @@
+#Set-up
+!pip install -q torch torchvision transformers datasets pandas scikit-learn tqdm
+
+import os
+import pandas as pd
+import torch
+from sklearn.model_selection import train_test_split
+from datasets import Dataset, DatasetDict
+from transformers import CLIPProcessor, CLIPModel, Trainer, TrainingArguments
+from PIL import Image
+from tqdm import tqdm
+
+#Load dataset
+from google.colab import drive
+drive.mount('/content/drive')
+IMAGE_DIR = "/content/drive/MyDrive/Global Health +AI course fall 2025/images_cropped_padded"           # <-- change this to your folder
+CSV_PATH = "/content/drive/MyDrive/Global Health +AI course fall 2025/all_labels.csv"    # <-- change if needed
+
+df = pd.read_csv(CSV_PATH)
+
+#Preview the csv
+print("CSV preview:")
+print(df.head())
+
+# Mapping dictionary (species column is numeric 0–6)
+species_map = {
+    0: "Anopheles funestus",
+    1: "Anopheles gambiae",
+    2: "Anopheles other",
+    3: "Culex",
+    4: "Aedes",
+    5: "Mansonia",
+    6: "Non-mosquito"
+}
+
+df["species_name"] = df["species"].map(species_map)
+df["binary_label"] = df["species"].apply(lambda x: 0 if x == 6 else 1)  # 1 = mosquito, 0 = non-mosquito
+
+
+#split dataset 
+train_df, temp_df = train_test_split(df, test_size=0.3, stratify=df["binary_label"], random_state=42)
+val_df, test_df = train_test_split(temp_df, test_size=0.5, stratify=temp_df["binary_label"], random_state=42)
+
+print(f"Train: {len(train_df)} | Val: {len(val_df)} | Test: {len(test_df)}")
+
+#convert to huggingface 
+def df_to_dataset(sub_df):
+    return Dataset.from_pandas(sub_df.reset_index(drop=True))
+
+dataset_dict = DatasetDict({
+    "train": df_to_dataset(train_df),
+    "validation": df_to_dataset(val_df),
+    "test": df_to_dataset(test_df)
+})
+
+#load CLIP
+model_name = "openai/clip-vit-base-patch16"
+processor = CLIPProcessor.from_pretrained(model_name)
+model = CLIPModel.from_pretrained(model_name)
+
+#pre-process
+def preprocess(examples):
+    image_paths = [os.path.join(IMAGE_DIR, img_name) for img_name in examples["Image_name"]]
+    images = [Image.open(image_path).convert("RGB") for image_path in image_paths]
+    texts = ["a photo of a mosquito" if label == 1 else "a photo without a mosquito" for label in examples["binary_label"]]
+    inputs = processor(text=texts, images=images, return_tensors="pt", padding=True)
+    return {
+        "pixel_values": inputs["pixel_values"],
+        "input_ids": inputs["input_ids"],
+        "attention_mask": inputs["attention_mask"],
+        "label": torch.tensor(examples["binary_label"], dtype=torch.long)
+    }
+
+# Map preprocessing
+dataset_dict = dataset_dict.with_transform(preprocess)
+
+#training set up
+from transformers import TrainingArguments
+
+training_args = TrainingArguments(
+    output_dir="./clip-mosquito-checkpoints",
+    per_device_train_batch_size=8,
+    per_device_eval_batch_size=8,
+    num_train_epochs=5,
+    learning_rate=5e-6,
+    eval_strategy="epoch", # Changed from evaluation_strategy
+    save_strategy="epoch",
+    logging_dir="./logs",
+    logging_steps=50,
+    remove_unused_columns=False,
+    report_to="none"
+)
+
+#Train
+from torch.nn import functional as F
+
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    preds = logits.argmax(axis=1)
+    acc = (preds == labels).mean()
+    return {"accuracy": acc}
+
+# Create a small wrapper to use the right output for binary classification
+class CLIPBinary(torch.nn.Module):
+    def __init__(self, clip_model):
+        super().__init__()
+        self.clip = clip_model
+    def forward(self, pixel_values=None, input_ids=None, attention_mask=None, labels=None):
+        outputs = self.clip(input_ids=input_ids, attention_mask=attention_mask, pixel_values=pixel_values)
+        logits = outputs.logits_per_image  # (batch_size, 1)
+        loss = F.cross_entropy(logits, labels)
+        return {"loss": loss, "logits": logits}
+
+wrapped_model = CLIPBinary(model)
+
+trainer = Trainer(
+    model=wrapped_model,
+    args=training_args,
+    train_dataset=dataset_dict["train"],
+    eval_dataset=dataset_dict["validation"],
+    compute_metrics=compute_metrics,
+)
+
+
+trainer.train()
+
+#Save model
+model.save_pretrained("clip-mosquito-classifier")
+processor.save_pretrained("clip-mosquito-classifier")
+
+#test
+print("Evaluating on Test Set...")
+
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+import numpy as np
+
+y_true = []
+y_pred = []
+
+for _, row in tqdm(test_df.iterrows(), total=len(test_df)):
+    image_path = os.path.join(IMAGE_DIR, row["filename"])
+    image = Image.open(image_path).convert("RGB")
+    inputs = processor(text=["mosquito", "non-mosquito"], images=image, return_tensors="pt", padding=True)
+    with torch.no_grad():
+        outputs = model(**inputs)
+        logits = outputs.logits_per_image
+        pred = logits.argmax().item()
+    y_true.append(row["binary_label"])
+    y_pred.append(1 if pred == 0 else 0)  # "mosquito" corresponds to 1
+
+acc = accuracy_score(y_true, y_pred)
+cm = confusion_matrix(y_true, y_pred)
+print(f"\nTest Accuracy: {acc:.4f}")
+print("\nConfusion Matrix:\n", cm)
+print("\nClassification Report:\n", classification_report(y_true, y_pred, target_names=["non-mosquito", "mosquito"]))
+
+
+#output mosquito images
+print("Generating mosquito-only dataset...")
+
+mosquito_results = []
+
+for _, row in tqdm(test_df.iterrows(), total=len(test_df)):
+    image_path = os.path.join(IMAGE_DIR, row["filename"])
+    image = Image.open(image_path).convert("RGB")
+    inputs = processor(text=["mosquito", "non-mosquito"], images=image, return_tensors="pt", padding=True)
+    outputs = model(**inputs)
+    logits = outputs.logits_per_image
+    pred = logits.argmax().item()
+    if pred == 0:  # "mosquito"
+        mosquito_results.append(row)
+
+mosquito_df = pd.DataFrame(mosquito_results)
+mosquito_df.to_csv("mosquito_only_dataset.csv", index=False)
+
+print("Saved all mosquito images to mosquito_only_dataset.csv")
