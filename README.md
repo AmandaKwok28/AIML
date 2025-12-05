@@ -29,3 +29,7 @@ To obtain an API key:
 
 ### Navigating the Repo
 Most of our code is located within the Semster Project folder. The code within this repository was used to process our data prior to uploading it to the drive. 
+
+
+### 4. Viewing the dataset
+To access our augmented dataset, navigate to the Semester Project shared folder to the directory `/src/Semester Project/data-augmentation/selected_images.xlsx` which contains the image paths relative to the Global Health + AI Course Fall 2025 shared folder as well as corresponding augmented descriptions. Please note that we did not push the vector cam datset to the github for privacy reasons which is why we provide the drive link in case users would like to run the demo notebook.
