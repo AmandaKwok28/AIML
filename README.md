@@ -3,7 +3,7 @@
 ## Getting Started
 
 ### 1. Running the Demonstration Notebook
-To explore our end-to-end pipeline, open the file **`/src/demo.ipynb`** and upload it to your Google Drive. All required paths are configured to run automatically once the appropriate Drive shortcuts are in place.
+To explore our end-to-end pipeline, open the file **`/src/demo.ipynb`** and upload it to your Google Drive. All required paths are configured to run automatically once the appropriate Drive shortcuts are in place. Also note that in the `/src` directory, you will find the pdf of the run notebook which shows expected behavior.
 
 ### 2. Mounting Google Drive
 The demonstration notebook expects two shared course folders to exist as shortcuts inside your **MyDrive** directory. Please add the following shortcuts:
